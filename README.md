@@ -1,122 +1,179 @@
 # Homelab Deck agent
 
-An optional always-on service for your own network, for the one thing a phone
-genuinely cannot do well: **notice a problem at 3am and tell you about it.**
+An optional always-on service for your own network. The app works without it —
+you point the phone at each server and it talks to them directly. The agent
+exists for the one thing a phone genuinely cannot do well: **notice a problem
+at 3am and tell you.**
 
-iOS decides when a backgrounded app may run. "Usually about once an hour, and
-sometimes much longer" is a weak backbone for the job that actually matters, so
-the agent takes it over: it polls on a schedule nobody defers, and the app reads
-from it.
+iOS decides when a backgrounded app may run. "Usually around once an hour, and
+it may skip for much longer" is honest, and it is a weak backbone for the one
+job that matters. The agent polls on a timer nobody can defer.
 
-**The app works without this.** Point your phone at each server and it talks to
-them directly — that is still the primary mode, and nothing here is required.
+## What it is
 
-## What it does
+A single binary that runs **the app's own adapters** — literally the same
+source files, compiled into it. That is the point: an agent that graded
+problems differently from the phone would be worse than no agent, because you
+would stop trusting both. The concern rules, the thresholds, the fix guides
+and the wording all come from one place.
 
-- Polls every server you configure, on a fixed interval.
-- Serves one JSON endpoint the Homelab Deck app reads.
-- Forwards alerts to **ntfy, Gotify, or a webhook** when something needs
-  attention — and forwards a given problem *once*, not every minute.
+It:
 
-It runs the **same adapters and the same rules as the app**. An agent that
-graded problems differently from the phone would be worse than no agent,
-because you would stop trusting both.
+- polls every configured server on a schedule you set,
+- serves one JSON endpoint the app reads,
+- forwards new problems to your ntfy, Gotify or webhook — the reliable
+  notification path, running on hardware you own.
 
-## What it deliberately does not do
-
-Said out loud, because a service that quietly skipped things would look broken:
-
-- **No consoles.** The agent has no screen, and a service that could open a
-  root shell on request is a far larger thing to leave running on a network
-  than a poller. Consoles stay in the app, behind a biometric prompt.
-- **No pinned self-signed certificates yet.** The app refuses a certificate no
-  human has approved, and that rule is not negotiable — so rather than disable
-  validation, the agent *refuses* those hosts and says why.
-- **Synology** is not supported yet; its adapter is unverified against real
-  hardware.
+It does **not** open consoles. The agent has no screen, and a service that
+could open a root shell on request is a far larger thing to leave running on a
+network than a poller. Consoles stay in the app, where a human and a biometric
+gate are.
 
 ## Install
 
-Debian or Ubuntu — an LXC, a VM, a Raspberry Pi. Needs ~256MB of RAM and 2GB of
-disk, because the binary is fully static and carries its own runtime.
+### On an LXC, VM or Pi — build on your Mac, copy one file
+
+The recommended route. The binary is **fully static**: no Swift runtime, no
+glibc, nothing to install on the target. That is why the container can be
+256MB of RAM and 2GB of disk.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lhend941/homelab-deck-agent/main/install.sh -o install.sh
-less install.sh          # please actually read it
-sudo bash install.sh --download
+cd agent
+./build-linux.sh                       # ARCH=aarch64 for a Pi
+scp build/homelab-deck-agent-linux-x86_64 root@AGENT-LXC:/tmp/agent
+scp install.sh homelab-deck-agent.service root@AGENT-LXC:/tmp/
+ssh root@AGENT-LXC "bash /tmp/install.sh --binary /tmp/agent"
 ```
 
-The installer downloads the release binary for your architecture, **verifies
-its SHA-256 against the published `SHA256SUMS`, and refuses to install if that
-file is missing or does not match.** A daemon that will hold every credential
-on your network is not something to install from an unverified download.
+One-time setup on the Mac (swiftly + the Static Linux SDK) is documented in
+the header of `build-linux.sh`. **Xcode's Swift will not do** — Apple's
+toolchain and swift.org's are different builds of the same version number,
+and the SDK refuses the mismatch.
 
-Then pair and configure:
+Then add your servers to `/etc/homelab-deck/config.json` and
+`systemctl start homelab-deck-agent`.
+
+### Or build on the box itself
+
+Needs a Swift toolchain there (2-3GB, and compiling wants ~4GB of RAM):
 
 ```bash
-sudo homelab-deck-agent pair          # writes a config skeleton + a token
-sudoedit /etc/homelab-deck/config.json # add your servers
-sudo systemctl enable --now homelab-deck-agent
+git clone https://github.com/lhend941/homelab-deck.git
+cd homelab-deck/agent
+sudo ./install.sh
 ```
 
-Check it:
+### Anywhere with Docker
+
+For TrueNAS apps, Unraid, Synology, or a plain Docker host:
 
 ```bash
-homelab-deck-agent check              # one timed pass over every host
-curl localhost:8787/v1/health
-```
-
-Docker, for TrueNAS apps, Unraid, Synology, or a plain Docker host — so Proxmox
-is not required:
-
-```bash
-docker build -t homelab-deck-agent .
 docker run -d --name homelab-deck-agent \
   -v /etc/homelab-deck:/etc/homelab-deck \
-  -v /var/lib/homelab-deck:/var/lib/homelab-deck \
-  -p 8787:8787 homelab-deck-agent
+  -p 8787:8787 \
+  ghcr.io/lhend941/homelab-deck-agent
 ```
 
-## The config file, and the deal it asks of you
+## Configuration
 
-`/etc/homelab-deck/config.json` holds **every credential the agent has, in
-plaintext.** A headless Linux service has nowhere better — there is no Keychain.
-So:
+`/etc/homelab-deck/config.json`, mode `600`:
+
+```json
+{
+  "listenPort": 8787,
+  "pollSeconds": 60,
+  "token": "generated by `homelab-deck-agent pair`",
+  "hosts": [
+    {
+      "id": "0F5B0C5E-2B7E-4E1F-9E9C-9E1A2B3C4D5E",
+      "name": "PVE01",
+      "platform": "proxmox",
+      "address": "192.168.1.20",
+      "port": 8006,
+      "scheme": "https",
+      "credential": {
+        "proxmoxAPIToken": { "tokenID": "root@pam!homelabdeck", "secret": "…" }
+      }
+    }
+  ],
+  "forwarding": {
+    "kind": "ntfy",
+    "url": "https://ntfy.example.net/your-topic"
+  }
+}
+```
+
+Only `token` and `hosts` are required — `listenPort` defaults to 8787,
+`pollSeconds` to 60, and a host's `scheme` to `https`.
+
+`id` is any UUID; keep it stable and the app will keep the same host across
+restarts. `platform` is one of `proxmox`, `proxmoxBackup`, `truenas`,
+`homeAssistant`, `portainer`, `uptimeKuma`, `unifi`, `opnsense`, `pihole`,
+`adguard`, `unraid`.
+
+`credential` takes one of three shapes:
+
+```json
+{ "apiKey": "..." }
+{ "proxmoxAPIToken": { "tokenID": "root@pam!homelabdeck", "secret": "..." } }
+{ "usernameAndPassword": { "username": "...", "password": "..." } }
+```
+
+`statePath` is optional and defaults to `/var/lib/homelab-deck/spoken.json`.
+It holds a record of which alerts have already been sent, so restarting the
+agent does not re-announce every problem that is still live. If the directory
+cannot be written the agent still starts, says so, and forgets on each restart
+— being awake at 3am matters more than not repeating yourself.
+
+### About that file
+
+It holds every credential the agent has, in plaintext. A headless Linux
+service has nowhere better — there is no Keychain — so:
 
 - the installer creates it `0600`, owned by an unprivileged `homelabdeck` user;
 - **the agent refuses to start if the permissions are looser than that**;
 - the systemd unit runs with almost every capability removed.
 
-That is the deal, and it is worth stating plainly rather than burying.
+That is the deal, and it is worth saying out loud rather than burying.
 
-**The token is authentication, not encryption.** The API is plain HTTP. Reach it
-over a tunnel or a VPN rather than forwarding a port to the internet.
+## Endpoints
 
-## Connecting the app
+| | |
+|---|---|
+| `GET /v1/health` | Liveness. No token — it reveals nothing but that something is listening, and locking it up only makes the agent harder to monitor. |
+| `GET /v1/fleet` | Everything, as `HostSnapshot`s. Needs `Authorization: Bearer <token>`. |
 
-In Homelab Deck: **Settings → Alerts → Agent**. Enter the address the agent
-prints at startup and the pairing token from `homelab-deck-agent pair`.
+**Do not port-forward this.** The token is authentication, not encryption, and
+the agent speaks plain HTTP deliberately — TLS belongs to a tunnel. Reach it
+over Tailscale, WireGuard, or a Cloudflare tunnel.
 
-A reading that came from the agent says so on the card, with its age. The newer
-of the two always wins, whoever took it.
+## What it can't do yet
 
-## Uninstall
+Stated plainly, because a service that silently skipped things would look like
+a broken service. The agent says all of this at startup too.
+
+- **TrueNAS and Home Assistant.** Both are reached over websockets, and the
+  app's websocket layer is `URLSessionWebSocketTask` with an Apple-only
+  pinning delegate. It needs the same kind of seam the HTTP layer already got.
+  Watch those two directly from the app for now.
+- **Pinned self-signed certificates.** The app refuses an unknown certificate
+  until a human approves its fingerprint, and that rule is not negotiable — so
+  rather than disable validation to make self-signed hosts work, the agent
+  *refuses* them and says why. Hosts on HTTP, or with a CA-issued certificate,
+  work today.
+- **Push to the phone.** Today the agent forwards to ntfy/Gotify/webhook,
+  which is already the reliable path. Native push needs an APNs relay; the
+  design is an encrypted blob through a stateless forwarder, so nothing
+  readable ever leaves your network.
+- **Synology** is hidden in the app pending hardware, and hidden here too.
+
+## Building and testing
 
 ```bash
-sudo systemctl disable --now homelab-deck-agent
-sudo rm -f /usr/local/bin/homelab-deck-agent \
-           /etc/systemd/system/homelab-deck-agent.service
-sudo rm -rf /etc/homelab-deck /var/lib/homelab-deck   # deletes your credentials
-sudo userdel homelabdeck
+swift build            # the binary
+swift test             # the agent's own tests
 ```
 
-## Source
-
-This repository publishes the installer and the release binaries. The agent's
-source currently lives with the app, because it compiles the app's own adapter
-files rather than a copy of them — that is deliberate, and it is what keeps the
-two grading problems identically.
-
-## Support
-
-Issues here for the agent. The app itself: https://homelabdeck.app/support/
+The app's 620 tests cover the shared adapters and concern rules; these cover
+the parts that only exist here — the token check, the request parser, the
+config's permissions, the wire format, and the forwarder's request shapes.
