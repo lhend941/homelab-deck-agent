@@ -125,7 +125,58 @@ chmod 700 "$CONFIG_DIR"
 chmod 600 "$CONFIG"
 
 echo "→ installing the systemd unit"
-install -m 0644 "$HERE/homelab-deck-agent.service" "$UNIT"
+# Written from here rather than copied from a file next to this script.
+#
+# `--download` fetches install.sh ALONE, so anything it expected to find
+# beside itself was simply absent — which is exactly how the first real
+# install failed: "cannot stat /root/homelab-deck-agent.service". Embedding it
+# makes a standalone install.sh self-contained, and makes this the single
+# definition of the unit rather than one of two that can drift apart.
+cat > "$UNIT" <<'UNIT_EOF'
+[Unit]
+Description=Homelab Deck agent
+Documentation=https://homelabdeck.app/support/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=homelabdeck
+Group=homelabdeck
+ExecStart=/usr/local/bin/homelab-deck-agent run --config /etc/homelab-deck/config.json
+Restart=always
+RestartSec=5
+
+# The agent polls other people's servers and answers one HTTP endpoint. It
+# has no business doing anything else, so it is allowed almost nothing.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Read-only everywhere except its own config directory, which it never writes
+# during `run` — this is belt and braces for a file holding every credential.
+ReadOnlyPaths=/etc/homelab-deck
+
+# /var/lib/homelab-deck, created and chowned to this service's user by systemd.
+# ProtectSystem=strict leaves the agent nothing else it may write, and it needs
+# exactly one thing: a record of which alerts it has already sent, so a restart
+# does not re-announce every problem that is still live. Without this the agent
+# still runs and says at startup that it will forget.
+StateDirectory=homelab-deck
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+chmod 0644 "$UNIT"
 systemctl daemon-reload
 systemctl enable homelab-deck-agent
 
