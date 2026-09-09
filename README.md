@@ -117,6 +117,26 @@ sudo systemctl restart homelab-deck-agent
 That is system-wide trust **on that machine**, which is why the agent belongs
 in a container of its own: the blast radius is one box that does nothing else.
 
+### The `trust` command
+
+Rather than the procedure above, the agent can do it and check your work:
+
+```bash
+sudo homelab-deck-agent trust 10.0.0.20:8006
+```
+
+It fetches the certificate, shows you its subject, issuer and SHA-256
+fingerprint, and asks you to confirm — the same trust-on-first-use the app
+does, except the approval is at a prompt. Compare the fingerprint against what
+the server itself shows, or pass one you already have:
+
+```bash
+sudo homelab-deck-agent trust 10.0.0.20:8006 --fingerprint AA:BB:... --yes
+```
+
+Any mismatch refuses outright and changes nothing. It also tells you when
+trusting will not be enough, rather than leaving you to discover it.
+
 ### When trusting is not enough
 
 The certificate still has to match the address you dial. A certificate issued
