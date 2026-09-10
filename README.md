@@ -35,10 +35,27 @@ Said out loud, because a service that quietly skipped things would look broken:
 - **Synology** is not supported yet; its adapter is unverified against real
   hardware.
 
-## Install
+## Setting it up, from nothing
 
-Debian or Ubuntu — an LXC, a VM, a Raspberry Pi. Needs ~256MB of RAM and 2GB of
-disk, because the binary is fully static and carries its own runtime.
+### 1. Make a container for it
+
+Debian or Ubuntu. An LXC, a VM, or a Raspberry Pi — it needs very little:
+
+| | |
+|---|---|
+| RAM | 256 MB |
+| Disk | 2 GB |
+| CPU | 1 core |
+
+The binary is fully static and carries its own runtime, so nothing else gets
+installed. **Give it a container of its own** — step 3 trusts your servers'
+certificates machine-wide, and you want that blast radius to be one box that
+does nothing else.
+
+On Proxmox, a Debian 13 container with those numbers on your normal LAN is
+exactly right. It does not need a public address, a tunnel, or a port forward.
+
+### 2. Install the agent
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lhend941/homelab-deck-agent/main/install.sh -o install.sh
@@ -46,12 +63,64 @@ less install.sh          # please actually read it
 sudo bash install.sh --download
 ```
 
-The installer downloads the release binary for your architecture, **verifies
-its SHA-256 against the published `SHA256SUMS`, and refuses to install if that
-file is missing or does not match.** A daemon that will hold every credential
-on your network is not something to install from an unverified download.
+That downloads the release binary for your architecture, **verifies its SHA-256
+against the published checksums, and refuses to install if that file is missing
+or does not match.** It then creates an unprivileged `homelabdeck` user, installs
+a systemd unit, and writes a starter config with a fresh pairing token.
 
-`credential` takes one of three shapes:
+**Write down the pairing token it prints.** You need it in step 5. If you lose
+it:
+
+```bash
+sudo homelab-deck-agent pair      # prints the existing token, does not replace it
+```
+
+### 3. Trust your servers' certificates
+
+**Do this before adding servers, or nothing will connect.** Almost every
+homelab box ships a self-signed certificate — Proxmox and TrueNAS both do — and
+the agent validates certificates like any other client.
+
+For each server, on the agent's machine:
+
+```bash
+sudo homelab-deck-agent trust 192.168.1.20:8006
+```
+
+It shows you the certificate's fingerprint and asks before trusting anything.
+Compare it against what the server itself shows. See
+[HTTPS and self-signed certificates](#https-and-self-signed-certificates--read-this-first)
+below for the case where this is not enough.
+
+### 4. Add your servers
+
+```bash
+sudoedit /etc/homelab-deck/config.json
+```
+
+```json
+{
+  "token": "leave the token that is already there",
+  "hosts": [
+    {
+      "id": "0F5B0C5E-2B7E-4E1F-9E9C-9E1A2B3C4D5E",
+      "name": "PVE01",
+      "platform": "proxmox",
+      "address": "192.168.1.20",
+      "port": 8006,
+      "credential": {
+        "proxmoxAPIToken": { "tokenID": "root@pam!homelabdeck", "secret": "..." }
+      }
+    }
+  ]
+}
+```
+
+- `id` is **any UUID** — generate one with `uuidgen`. Keep it stable and the app
+  keeps the same host across restarts.
+- `platform` is one of `proxmox`, `proxmoxBackup`, `truenas`, `homeAssistant`,
+  `portainer`, `uptimeKuma`, `unifi`, `opnsense`, `pihole`, `adguard`, `unraid`.
+- `credential` takes one of three shapes:
 
 ```json
 { "apiKey": "..." }
@@ -59,26 +128,55 @@ on your network is not something to install from an unverified download.
 { "usernameAndPassword": { "username": "...", "password": "..." } }
 ```
 
-Only `token` and `hosts` are required — `listenPort` defaults to 8787,
-`pollSeconds` to 60, and a host's `scheme` to `https`.
+- Only `token` and `hosts` are required. `listenPort` defaults to 8787,
+  `pollSeconds` to 60, and a host's `scheme` to `https`.
 
-Then pair and configure:
+Then start it and check your work:
 
 ```bash
-sudo homelab-deck-agent pair          # writes a config skeleton + a token
-sudoedit /etc/homelab-deck/config.json # add your servers
 sudo systemctl enable --now homelab-deck-agent
+homelab-deck-agent check
 ```
 
-Check it:
+`check` reads every host once and prints how long each took, so a wrong
+credential or an untrusted certificate shows up immediately with the reason
+rather than as a blank card in the app later.
 
-```bash
-homelab-deck-agent check              # one timed pass over every host
-curl localhost:8787/v1/health
+### 5. Connect the app
+
+In Homelab Deck: **Settings → Alerts → Agent**.
+
+- **Address** — what the agent printed at startup, e.g. `192.168.1.50:8787`
+- **Pairing token** — from step 2
+
+Tap **Test and pair**. It checks the address first, then the token, so a typo
+is reported as the thing it actually is. Nothing is saved unless the test
+passes.
+
+Readings that came from the agent are labelled *via agent* on the fleet, with
+their age. The newer of the two always wins, whoever took it.
+
+### 6. Optional: alerts when you are not looking
+
+Either or both, and they work independently.
+
+**To ntfy, Gotify or a webhook** — add to the config:
+
+```json
+"forwarding": { "kind": "ntfy", "url": "https://ntfy.sh/your-topic" }
 ```
 
-Docker, for TrueNAS apps, Unraid, Synology, or a plain Docker host — so Proxmox
-is not required:
+**Native push to the phone** — Settings → Alerts → Agent → *Turn on push*. The
+relay address is already filled in.
+
+Your servers' names and problems are **not** sent. The notification says only
+that something needs attention; the app fetches the detail from your own agent
+when you open it.
+
+### Docker instead
+
+For TrueNAS apps, Unraid, Synology, or a plain Docker host — so Proxmox is not
+required:
 
 ```bash
 docker build -t homelab-deck-agent .
@@ -87,6 +185,14 @@ docker run -d --name homelab-deck-agent \
   -v /var/lib/homelab-deck:/var/lib/homelab-deck \
   -p 8787:8787 homelab-deck-agent
 ```
+
+### Upgrading
+
+```bash
+sudo bash install.sh --download && sudo systemctl restart homelab-deck-agent
+```
+
+Your config and pairing token are left alone.
 
 ## HTTPS and self-signed certificates — read this first
 
@@ -165,20 +271,13 @@ So:
 
 - the installer creates it `0600`, owned by an unprivileged `homelabdeck` user;
 - **the agent refuses to start if the permissions are looser than that**;
-- the systemd unit runs with almost every capability removed.
+- the systemd unit runs with almost every capability removed, and the config
+  directory is read-only to the service.
 
 That is the deal, and it is worth stating plainly rather than burying.
 
 **The token is authentication, not encryption.** The API is plain HTTP. Reach it
 over a tunnel or a VPN rather than forwarding a port to the internet.
-
-## Connecting the app
-
-In Homelab Deck: **Settings → Alerts → Agent**. Enter the address the agent
-prints at startup and the pairing token from `homelab-deck-agent pair`.
-
-A reading that came from the agent says so on the card, with its age. The newer
-of the two always wins, whoever took it.
 
 ## Uninstall
 
