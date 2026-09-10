@@ -55,6 +55,11 @@ does nothing else.
 On Proxmox, a Debian 13 container with those numbers on your normal LAN is
 exactly right. It does not need a public address, a tunnel, or a port forward.
 
+**Give it a fixed address** — a DHCP reservation or a static one. The agent
+issues itself a TLS certificate that names its address, and your phone pins
+it. If the address moves, every paired phone refuses to connect until you
+re-pair. Do this before step 2.
+
 ### 2. Install the agent
 
 ```bash
@@ -68,11 +73,16 @@ against the published checksums, and refuses to install if that file is missing
 or does not match.** It then creates an unprivileged `homelabdeck` user, installs
 a systemd unit, and writes a starter config with a fresh pairing token.
 
+It also turns on **HTTPS**, with a certificate naming the machine's address —
+the agent reads its own interfaces to work that out. If the machine has more
+than one address it says which it chose and how to change it.
+
 **Write down the pairing token it prints.** You need it in step 5. If you lose
 it:
 
 ```bash
-sudo homelab-deck-agent pair      # prints the existing token, does not replace it
+sudo homelab-deck-agent pair          # prints the existing token, does not replace it
+sudo homelab-deck-agent fingerprint   # the certificate's SHA-256, for step 5
 ```
 
 ### 3. Trust your servers' certificates
@@ -138,6 +148,23 @@ sudo systemctl enable --now homelab-deck-agent
 homelab-deck-agent check
 ```
 
+**Or skip the editing.** If your servers are already set up in the app, you
+can send them to the agent instead. That needs a second secret, because
+reading your fleet and reconfiguring the agent are deliberately not the same
+permission:
+
+```bash
+sudo homelab-deck-agent write-token   # prints it; enter it in the app
+```
+
+Then in the app, **Settings → Alerts → Agent → Send my servers to the agent**.
+Console sign-ins are never sent — the agent never opens a console, and those
+are account passwords rather than scoped tokens. Restart the agent afterwards.
+
+Without a write token the agent is read-only, which is the default. A pairing
+token that leaks — a screenshot, a backup — still cannot change where your
+agent looks.
+
 `check` reads every host once and prints how long each took, so a wrong
 credential or an untrusted certificate shows up immediately with the reason
 rather than as a blank card in the app later.
@@ -146,12 +173,20 @@ rather than as a blank card in the app later.
 
 In Homelab Deck: **Settings → Alerts → Agent**.
 
-- **Address** — what the agent printed at startup, e.g. `192.168.1.50:8787`
+- **Address** — `https://` plus what the agent printed at startup, e.g.
+  `https://192.168.1.50:8787`
 - **Pairing token** — from step 2
 
-Tap **Test and pair**. It checks the address first, then the token, so a typo
-is reported as the thing it actually is. Nothing is saved unless the test
-passes.
+Tap **Test and pair**. The app will show you the agent's certificate
+fingerprint and ask you to trust it. **Compare it against**
+`sudo homelab-deck-agent fingerprint` **on the agent's machine** — they must
+match exactly. If they differ, something is answering in place of your agent;
+do not continue.
+
+This is the same trust-on-first-use check the app does for your servers. The
+agent signs its own certificate, so nothing can vouch for it but you, once.
+
+After that it checks the token. Nothing is saved unless every step passes.
 
 Readings that came from the agent are labelled *via agent* on the fleet, with
 their age. The newer of the two always wins, whoever took it.
@@ -193,6 +228,15 @@ sudo bash install.sh --download && sudo systemctl restart homelab-deck-agent
 ```
 
 Your config and pairing token are left alone.
+
+## Two certificates, two directions
+
+There are two self-signed certificates in play and it helps to keep them apart:
+
+| | Who signs it | Who checks it | How |
+|---|---|---|---|
+| **Your servers'** (Proxmox, TrueNAS…) | the server | the agent | `homelab-deck-agent trust` — step 3 |
+| **The agent's own** | the agent | your phone | fingerprint shown at pairing — step 5 |
 
 ## HTTPS and self-signed certificates — read this first
 
