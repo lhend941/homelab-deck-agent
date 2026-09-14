@@ -29,9 +29,11 @@ Said out loud, because a service that quietly skipped things would look broken:
 - **No consoles.** The agent has no screen, and a service that could open a
   root shell on request is a far larger thing to leave running on a network
   than a poller. Consoles stay in the app, behind a biometric prompt.
-- **No pinned self-signed certificates yet.** The app refuses a certificate no
-  human has approved, and that rule is not negotiable — so rather than disable
-  validation, the agent *refuses* those hosts and says why.
+- **No certificate pinning, and no relaxed verification.** The app accepts a
+  self-signed certificate once you approve its fingerprint; the agent checks
+  certificates like any other client, so a self-signed server needs trusting
+  on the agent's machine first (step 3). Each host that fails says which fix
+  it needs.
 - **Synology** is not supported yet; its adapter is unverified against real
   hardware.
 
@@ -157,9 +159,11 @@ permission:
 sudo homelab-deck-agent write-token   # prints it; enter it in the app
 ```
 
-Then in the app, **Settings → Alerts → Agent → Send my servers to the agent**.
+Then in the app, **Settings → Agent**, paste it into *Write token*. From then on
+the app sends your servers whenever you add, change or remove one (*Sync now*
+does it on demand), and the agent picks the list up without a restart.
 Console sign-ins are never sent — the agent never opens a console, and those
-are account passwords rather than scoped tokens. Restart the agent afterwards.
+are account passwords rather than scoped tokens.
 
 Without a write token the agent is read-only, which is the default. A pairing
 token that leaks — a screenshot, a backup — still cannot change where your
@@ -171,7 +175,7 @@ rather than as a blank card in the app later.
 
 ### 5. Connect the app
 
-In Homelab Deck: **Settings → Alerts → Agent**.
+In Homelab Deck: **Settings → Agent**.
 
 - **Address** — `https://` plus what the agent printed at startup, e.g.
   `https://192.168.1.50:8787`
@@ -201,7 +205,7 @@ Either or both, and they work independently.
 "forwarding": { "kind": "ntfy", "url": "https://ntfy.sh/your-topic" }
 ```
 
-**Native push to the phone** — Settings → Alerts → Agent → *Turn on push*. The
+**Native push to the phone** — Settings → Agent → *Turn on push*. The
 relay address is already filled in.
 
 Your servers' names and problems are **not** sent. The notification says only
@@ -303,9 +307,19 @@ Either install a certificate on TrueNAS that names the address you use, or
 watch TrueNAS directly from the app, which does trust-on-first-use with a
 fingerprint you approve by hand.
 
-Certificate pinning in the agent is the proper fix and is not built yet. A host
-with `pinnedCertificateSHA256` set is refused with a message saying so, rather
-than silently connecting to something unverified.
+A certificate issued by a public CA for a name that resolves on your network
+needs no trusting at all — point both the app and the agent at that name.
+
+### Servers you approved in the app
+
+The app accepts a self-signed certificate once you approve its fingerprint, and
+sends that fingerprint along when it syncs. **The agent does not pin.** It
+connects to a server only if the certificate verifies on its own machine, and
+uses the fingerprint just to explain a failure: an unknown issuer points you at
+`trust`, and a certificate for the wrong name says trusting will not help.
+
+Before 0.4.0 the agent refused every such server outright, even after `trust`.
+If yours did, upgrade.
 
 ## The config file, and the deal it asks of you
 
