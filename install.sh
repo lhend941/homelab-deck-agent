@@ -24,12 +24,17 @@ REPO="$(cd "$HERE/.." && pwd)"
 #                         the route for anyone who is not me: nothing to build,
 #                         nothing to cross-compile, and the checksum is
 #                         verified before anything is installed.
+#   --upgrade             `--download latest`, then restart a running agent and
+#                         print the version it now reports. Config, token and
+#                         TLS are never touched. The one line the app shows
+#                         when a newer agent is available.
 #   --binary PATH         install a binary built elsewhere — cross-compile on a
 #                         Mac with build-linux.sh and the container needs no
 #                         toolchain at all, so it can be 256MB of RAM.
 #   (neither)             build from source here, which needs Swift.
 BINARY=""
 DOWNLOAD=""
+UPGRADE=""
 VERSION="latest"
 RELEASES="${RELEASES:-https://github.com/lhend941/homelab-deck-agent/releases}"
 while [[ $# -gt 0 ]]; do
@@ -40,6 +45,7 @@ while [[ $# -gt 0 ]]; do
       # Optional version argument; anything starting with - is the next flag.
       if [[ -n "${2:-}" && "${2:-}" != -* ]]; then VERSION="$2"; shift; fi
       shift ;;
+    --upgrade) DOWNLOAD=1; UPGRADE=1; VERSION="latest"; shift ;;
     *) shift ;;
   esac
 done
@@ -179,6 +185,22 @@ UNIT_EOF
 chmod 0644 "$UNIT"
 systemctl daemon-reload
 systemctl enable homelab-deck-agent
+
+# An upgrade of a running agent: restart it and say what is running now,
+# because the version string is the only proof the new binary took — the
+# install can succeed and the old process keep serving.
+if [[ -n "$UPGRADE" ]] && systemctl is-active --quiet homelab-deck-agent; then
+  echo "→ restarting the running agent"
+  systemctl restart homelab-deck-agent
+  sleep 2
+  if systemctl is-active --quiet homelab-deck-agent; then
+    echo "✅ upgraded; the agent reports: $("$PREFIX/homelab-deck-agent" version)"
+  else
+    echo "The agent did not come back up. Look at: journalctl -u homelab-deck-agent -n 30" >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 cat <<MSG
 
